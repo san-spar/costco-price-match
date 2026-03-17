@@ -156,21 +156,25 @@ def update_item(receipt_id: str, index: int, item: dict = Body(...)):
 
 
 @app.post("/api/reparse/{receipt_id}")
-def reparse_receipt(receipt_id: str):
+def reparse_receipt(receipt_id: str, model: str = Query(default="auto")):
+    """Reparse a stored receipt PDF. model=auto|text|lite|premier. Default: auto (free text if possible)."""
     pdf_bytes = db.download_pdf(receipt_id)
     if not pdf_bytes:
         raise HTTPException(404, "PDF not found in S3 for this receipt")
     try:
-        parsed = receipt_parser.parse_receipt_pdf(pdf_bytes, model="premier")
+        parsed = receipt_parser.parse_receipt_pdf(pdf_bytes, model=model)
     except Exception as e:
-        raise HTTPException(500, f"Premier reparse failed: {e}")
+        raise HTTPException(500, f"Reparse failed: {e}")
     db.update_receipt_items(
         receipt_id,
         items=parsed.get("items", []),
         store=parsed.get("store", ""),
         receipt_date=parsed.get("receipt_date", ""),
     )
-    return {"items": len(parsed.get("items", [])), "model": "premier"}
+    return {
+        "items": len(parsed.get("items", [])),
+        "model": parsed.get("parsed_by", model),
+    }
 
 
 try:

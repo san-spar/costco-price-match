@@ -3,6 +3,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import * as ses from 'aws-cdk-lib/aws-ses';
+import { Platform } from 'aws-cdk-lib/aws-ecr-assets';
 import { Construct } from 'constructs';
 import { CommonStack } from './common-stack';
 
@@ -48,6 +49,7 @@ export class AgentCoreStack extends cdk.Stack {
       description: 'Weekly Costco price match scan + SES email report',
       agentRuntimeArtifact: agentcore.AgentRuntimeArtifact.fromAsset('../', {
         file: 'docker/agentcore.Dockerfile',
+        platform: Platform.LINUX_ARM64,
       }),
       executionRole: role,
       environmentVariables: {
@@ -60,7 +62,9 @@ export class AgentCoreStack extends cdk.Stack {
     });
 
     // SES identity for weekly email (sends verification on first deploy)
-    new ses.CfnEmailIdentity(this, 'SesIdentity', { emailIdentity: notifyEmail });
+    // RETAIN so rollbacks don't orphan a verified identity and block re-deploys
+    const sesIdentity = new ses.CfnEmailIdentity(this, 'SesIdentity', { emailIdentity: notifyEmail });
+    sesIdentity.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
 
     new cdk.CfnOutput(this, 'RuntimeId', {
       value: runtime.agentRuntimeId,

@@ -337,6 +337,199 @@ def _post_process(items: list) -> list:
     return merged
 
 
+def inspect_pdf(pdf_bytes: bytes) -> dict:
+    """Inspect a PDF to determine if it has selectable text or only images."""
+    import fitz
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    total_text_chars = 0
+    total_images = 0
+    for page in doc:
+        total_text_chars += len(page.get_text().strip())
+        total_images += len(page.get_images(full=False))
+    doc.close()
+
+    has_text = total_text_chars > 100
+    has_images = total_images > 0
+
+    if has_text:
+        recommended = "text"
+    elif has_images:
+        recommended = "bedrock-premier"
+    else:
+        recommended = "bedrock-lite"
+
+    return {
+        "has_text": has_text,
+        "has_images": has_images,
+        "text_chars": total_text_chars,
+        "image_count": total_images,
+        "recommended_parser": recommended,
+    }
+
+
+def _parse_text(pdf_bytes: bytes) -> dict:
+    """
+    Parse a text-based Costco receipt PDF using a line-by-line state machine.
+
+    Costco text PDFs use a multi-line format per item:
+        E                      ← tax-exempt flag (optional)
+        <item_number>          ← digits only, OR combined with name below
+        <item name>            ← may span two lines; may be combined with price
+        <price> N              ← e.g. "16.78 N"
+
+    Discount/TPD lines appear without an E:
+        <coupon_number>
+        / <item_number>
+        <amount>-
+    """
+    import fitz
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    full_text = "\n".join(page.get_text() for page in doc)
+    doc.close()
+
+    lines = [l.strip() for l in full_text.split("\n")]
+
+    # Store: first non-empty line (e.g. "LYNNWOOD #1190")
+    store = next((l for l in lines if l), "")
+
+    # Date: first MM/DD/YYYY occurrence
+    receipt_date = ""
+    date_m = re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", full_text)
+    if date_m:
+        mo, dy, yr = date_m.group(1), date_m.group(2), date_m.group(3)
+        receipt_date = f"{yr}-{mo.zfill(2)}-{dy.zfill(2)}"
+
+    # Patterns
+    _PRICE_RE = re.compile(r"^(\d+\.\d{2}-?)\s*[A-Z]?$")
+    _NUM_RE = re.compile(r"^\d{1,8}$")          # item number alone on its line
+    _INLINE_FULL_RE = re.compile(               # "1068080 PASTURE EGGS 8.49 N"
+        r"^(\d{1,8})\s+(.+?)\s+(\d+\.\d{2}-?)\s*[A-Z]?$"
+    )
+    _INLINE_PARTIAL_RE = re.compile(r"^(\d{1,8})\s+(.+)$")   # "1729565 LAUGHING"
+    _NAME_PRICE_RE = re.compile(r"^(.+?)\s+(\d+\.\d{2}-?)\s*[A-Z]?$")
+    _STOP = {"SUBTOTAL", "TAX", "TOTAL", "CHANGE", "VISA", "MASTERCARD", "AMEX", "DISCOVER"}
+
+    items = []
+    i = 0
+    n = len(lines)
+
+    while i < n:
+        line = lines[i]
+
+        # Stop at footer
+        if any(line.upper().startswith(w) for w in _STOP):
+            break
+
+        # Skip "E" (tax indicator) and blank lines
+        if line == "E" or not line:
+            i += 1
+            continue
+
+        # ── Full inline: "1068080 PASTURE EGGS 8.49 N" ──────────────────────
+        m = _INLINE_FULL_RE.match(line)
+        if m:
+            items.append({
+                "item_number": m.group(1),
+                "name": m.group(2).strip(),
+                "price": m.group(3),
+                "qty": "1",
+            })
+            i += 1
+            continue
+
+        # ── Partial inline: "1729565 LAUGHING" (name/price continue below) ──
+        m = _INLINE_PARTIAL_RE.match(line)
+        if m:
+            item_num = m.group(1)
+            name_parts = [m.group(2).strip()]
+            i += 1
+            while i < n:
+                l = lines[i]
+                pm = _PRICE_RE.match(l)
+                if pm:
+                    items.append({
+                        "item_number": item_num,
+                        "name": " ".join(name_parts).strip(),
+                        "price": pm.group(1),
+                        "qty": "1",
+                    })
+                    i += 1
+                    break
+                if l == "E" or any(l.upper().startswith(w) for w in _STOP):
+                    break
+                if l:
+                    name_parts.append(l)
+                i += 1
+            continue
+
+        # ── Item number on its own line ───────────────────────────────────────
+        if _NUM_RE.match(line):
+            item_num = line
+            i += 1
+            if i >= n:
+                break
+            next_line = lines[i]
+
+            # Discount/TPD: "/ 5331" follows the coupon number
+            if next_line.startswith("/"):
+                i += 1  # skip "/ XXXX"
+                if i < n:
+                    disc_m = re.match(r"^(\d+\.\d{2}-)$", lines[i])
+                    if disc_m:
+                        items.append({
+                            "item_number": item_num,
+                            "name": f"TPD/{item_num}",
+                            "price": disc_m.group(1),
+                            "qty": "1",
+                        })
+                    i += 1
+                continue
+
+            # Name + price on the same line: "ORG STRAWBRY 8.79 N"
+            np_m = _NAME_PRICE_RE.match(next_line)
+            if np_m:
+                items.append({
+                    "item_number": item_num,
+                    "name": np_m.group(1).strip(),
+                    "price": np_m.group(2),
+                    "qty": "1",
+                })
+                i += 1
+                continue
+
+            # Multi-line name then price on its own line
+            name_parts = []
+            while i < n:
+                l = lines[i]
+                pm = _PRICE_RE.match(l)
+                if pm:
+                    items.append({
+                        "item_number": item_num,
+                        "name": " ".join(name_parts).strip(),
+                        "price": pm.group(1),
+                        "qty": "1",
+                    })
+                    i += 1
+                    break
+                if l == "E" or any(l.upper().startswith(w) for w in _STOP):
+                    break
+                if l:
+                    name_parts.append(l)
+                i += 1
+            continue
+
+        i += 1
+
+    return {
+        "store": store,
+        "receipt_date": receipt_date,
+        "items": items,
+        "_raw_text": full_text,
+    }
+
+
 def parse_receipt_pdf(pdf_bytes: bytes, model: str = "auto") -> dict:
     """
     Parse receipt PDF. model can be:
@@ -355,6 +548,7 @@ def parse_receipt_pdf(pdf_bytes: bytes, model: str = "auto") -> dict:
         if info["has_text"]:
             # PDF has selectable text — parse directly, no Bedrock needed
             result = _parse_text(pdf_bytes)
+            result.pop("_raw_text", None)
             result["items"] = _post_process(result.get("items", []))
             result["parsed_by"] = "text"
             return result
@@ -364,6 +558,7 @@ def parse_receipt_pdf(pdf_bytes: bytes, model: str = "auto") -> dict:
     if model == "text":
         text_result = _parse_text(pdf_bytes)
         if text_result:
+            text_result.pop("_raw_text", None)
             text_result["items"] = _post_process(text_result.get("items", []))
             text_result["parsed_by"] = "text"
             return text_result

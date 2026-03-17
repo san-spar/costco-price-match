@@ -145,11 +145,27 @@ r = requests.put(
 )
 ```
 
-### Reparse a receipt with Nova Premier (higher accuracy)
+### Reparse a receipt (free text or Bedrock)
 ```python
-# Use when Nova 2 Lite missed items or parsed them incorrectly
-r = requests.post(f"{BASE}/api/reparse/<receipt_id>", headers=HEADERS, timeout=60).json()
-# NOTE: uses Bedrock Nova Premier — will fail if daily token quota is exhausted
+# model=auto (default) uses free text parser if PDF has selectable text, otherwise Bedrock
+# model=text  forces free text parse (no Bedrock tokens used)
+# model=premier forces Nova Premier (highest accuracy, uses Bedrock quota)
+r = requests.post(f"{BASE}/api/reparse/<receipt_id>?model=auto", headers=HEADERS, timeout=60).json()
+# Returns: {"items": N, "model": "text"|"bedrock-lite"|"bedrock-premier"}
+```
+
+### Reparse ALL receipts (bulk fix for missing item names)
+```python
+receipts = requests.get(f"{BASE}/api/receipts", headers=HEADERS).json()["receipts"]
+for rc in receipts:
+    rid = rc["receipt_id"]
+    # Check if items have missing names
+    bad = [item for item in rc.get("items", []) if not item.get("name") or item.get("name") == "?"]
+    if bad or not rc.get("items"):
+        r = requests.post(f"{BASE}/api/reparse/{rid}?model=auto", headers=HEADERS, timeout=60).json()
+        print(f"{rc.get('store')} {rc.get('receipt_date')}: reparsed → {r['items']} items via {r['model']}")
+    else:
+        print(f"{rc.get('store')} {rc.get('receipt_date')}: OK ({len(rc['items'])} items)")
 ```
 
 ### Delete a single deal

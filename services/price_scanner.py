@@ -219,6 +219,7 @@ def _scrape_coupon_book() -> list:
         base = re.sub(r"-\d+\.jpg$", "", img["src"])
 
         # Download and parse each page with Nova 2 Lite
+        throttle_strikes = 0
         for i in range(1, 20):
             url = f"{base}-{i}.jpg"
             r = requests.get(url, headers=headers, timeout=15)
@@ -258,8 +259,16 @@ def _scrape_coupon_book() -> list:
                             "link": flyer_url,
                         })
                 print(f"    Page {i}: {len(items)} items")
+                throttle_strikes = 0
             except Exception as e:
-                print(f"    Page {i} parse failed: {e}")
+                if "ThrottlingException" in str(e) or "Too many tokens" in str(e):
+                    throttle_strikes += 1
+                    print(f"    Page {i}: throttled (strike {throttle_strikes}/3) — skipping")
+                    if throttle_strikes >= 3:
+                        print("    Bedrock daily token limit reached — stopping coupon book scan")
+                        break
+                else:
+                    print(f"    Page {i} parse failed: {e}")
 
     except Exception as e:
         print(f"Coupon book scrape failed: {e}")

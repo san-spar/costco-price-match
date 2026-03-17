@@ -26,6 +26,22 @@ A weekly agent runs every Friday at 9pm ET, generates a formatted HTML report, a
 - **Storage**: DynamoDB (receipts + deals), S3 (receipt PDFs with presigned URLs)
 - **Infrastructure**: CDK (TypeScript), 3 stacks, deploy to any region
 
+## Project Structure
+
+```
+├── docker/        # Dockerfiles for Lambda and AgentCore
+├── infra/         # CDK infrastructure (TypeScript)
+├── ios/           # Native SwiftUI iOS app
+├── scripts/       # Build, deploy, and run scripts
+├── services/      # Python backend services (scrapers, parser, analyzer)
+├── skills/        # OpenClaw skill definitions
+├── static/        # Web frontend (HTML/CSS/JS)
+├── tests/         # API test scripts
+├── agent.py       # AgentCore weekly runner entry point
+├── app.py         # FastAPI application entry point
+└── requirements.txt
+```
+
 ## iOS App — CostScanner
 
 Native SwiftUI app with a BYOI (Bring Your Own Infrastructure) model. Deploy the CDK stack, paste your API URL in Settings, and the app auto-connects. No sign-in screen. No account creation. The infrastructure IS the account.
@@ -86,27 +102,52 @@ ios/CostcoScanner/
 
 ## Run Locally
 
+**macOS / Linux**
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-./run.sh
+./scripts/run.sh
+```
+
+**Windows**
+```powershell
+py -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+.\scripts\run.ps1
 ```
 
 Opens on `http://localhost:8000`. Auto-fetches DynamoDB/S3 resource names from the CDK stack.
 
 ## Deploy
 
+**macOS / Linux**
 ```bash
 cd infra && npm install && cd ..
 
 # Deploy Lambda, Amplify, API Gateway, Cognito, DynamoDB, S3
-NOTIFY_EMAIL=your-email@example.com ./deploy.sh
+NOTIFY_EMAIL=your-email@example.com ./scripts/deploy.sh
 
 # Deploy weekly agent (SES verification email sent on first deploy)
 cd infra && npx cdk deploy CostcoScannerAgentCore \
   -c region=us-west-2 \
   -c notifyEmail=your-email@example.com \
+  --require-approval never
+```
+
+**Windows**
+```powershell
+cd infra; npm install; cd ..
+
+# Deploy Lambda, Amplify, API Gateway, Cognito, DynamoDB, S3
+$env:NOTIFY_EMAIL = "your-email@example.com"; .\scripts\deploy.ps1
+
+# Deploy weekly agent
+cd infra
+npx cdk deploy CostcoScannerAgentCore `
+  -c region=us-west-2 `
+  -c notifyEmail=your-email@example.com `
   --require-approval never
 ```
 
@@ -124,6 +165,74 @@ npx cdk destroy CostcoScannerCommon -c region=us-west-2
 ## Cost
 
 Under $1/month for personal use. Bedrock Nova tokens are the main cost (~$0.10-0.20/week). Lambda, SES, DynamoDB, API Gateway, and Amplify fall within free tier.
+
+## ClawdBot / OpenClaw Integration
+
+Use this app from Telegram (or Discord) via [OpenClaw](https://github.com/openclaw/openclaw) — a self-hosted AI gateway that wraps skills around tools and routes chat messages to them.
+
+### What is OpenClaw?
+
+OpenClaw is a lightweight, self-hosted AI agent gateway. You connect it to Telegram or Discord, point it at your OpenClaw skill files, and it can call your APIs on your behalf in natural language.
+
+### Installing the costco-scanner skill
+
+**1. Install OpenClaw**
+
+```bash
+npm install -g openclaw
+openclaw init
+```
+
+**2. Copy the skill**
+
+```bash
+# Copy skill to OpenClaw's skills directory
+node scripts/setup-skills.js
+```
+
+Or manually copy `skills/costco-scanner/SKILL.md` to `~/.openclaw/skills/costco-scanner/SKILL.md`.
+
+**3. Set the environment variable**
+
+In `~/.openclaw/openclaw.json`, add under `skills.entries`:
+
+```json
+{
+  "skills": {
+    "entries": {
+      "costco-scanner": {
+        "COSTCO_SCANNER_URL": "https://<your-api-gateway-id>.execute-api.<region>.amazonaws.com"
+      }
+    }
+  }
+}
+```
+
+Get your API Gateway URL from the CDK deploy output (`CostcoScannerCommon.ApiUrl`).
+
+**4. Start a new session in Telegram**
+
+Send `/new` in your Telegram chat to start a fresh session — OpenClaw snapshots eligible skills at session start.
+
+### Triggering the skill
+
+The skill activates on phrases like:
+- *"Check my Costco receipts for price matches"*
+- *"What deals are on right now?"*
+- *"Scan for fresh Costco deals"*
+- *"Show my Bedrock token usage"*
+
+The agent authenticates against your Cognito pool automatically (credentials come from `/api/config`), calls the relevant API endpoints, and streams the analysis back to you.
+
+### Authentication
+
+The API uses AWS Cognito. The skill fetches credentials at runtime from `/api/config` (backed by Secrets Manager) — no tokens or passwords need to be stored in OpenClaw config.
+
+### Sync skill updates
+
+After editing `skills/costco-scanner/SKILL.md`, run `node scripts/setup-skills.js` to push changes to the live OpenClaw directory and send `/new` in Telegram.
+
+---
 
 ## Built With ❤️
 

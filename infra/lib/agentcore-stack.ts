@@ -47,7 +47,7 @@ export class AgentCoreStack extends cdk.Stack {
       runtimeName: 'costco_scanner',
       description: 'Weekly Costco price match scan + SES email report',
       agentRuntimeArtifact: agentcore.AgentRuntimeArtifact.fromAsset('../', {
-        file: 'agentcore.Dockerfile',
+        file: 'docker/agentcore.Dockerfile',
       }),
       executionRole: role,
       environmentVariables: {

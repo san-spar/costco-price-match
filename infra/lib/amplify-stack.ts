@@ -202,7 +202,7 @@ export class AmplifyStack extends cdk.Stack {
     this.lambdaFunction = new lambda.DockerImageFunction(this, 'ApiFunction', {
       functionName: 'costco-scanner-api',
       code: lambda.DockerImageCode.fromImageAsset('../', {
-        file: 'lambda.Dockerfile',
+        file: 'docker/lambda.Dockerfile',
       }),
       architecture: lambda.Architecture.ARM_64,
       role: lambdaRole,

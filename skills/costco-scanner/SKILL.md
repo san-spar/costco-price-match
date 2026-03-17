@@ -85,17 +85,37 @@ with requests.get(f"{BASE}/api/analyze", headers=HEADERS, params=params, stream=
             break
 ```
 
+### Inspect a PDF before uploading
+```python
+with open("/path/to/receipt.pdf", "rb") as f:
+    r = requests.post(f"{BASE}/api/inspect-pdf", headers=HEADERS, files={"file": f}).json()
+# r = {
+#   "pages": 1,
+#   "text_chars": 4521,    # > 0 means selectable text (free to parse)
+#   "image_count": 0,      # > 0 means scanned/image PDF (needs Bedrock)
+#   "has_text": True,
+#   "has_images": False,
+#   "recommended_parser": "text",   # "text", "bedrock-lite", or "bedrock-premier"
+#   "metadata": {...}      # PDF metadata (author, creator, creation date, etc.)
+# }
+print(r)
+```
+
 ### Upload a receipt PDF
 ```python
 with open("/path/to/receipt.pdf", "rb") as f:
     r = requests.post(f"{BASE}/api/upload", headers=HEADERS, files={"file": f}, timeout=60)
 result = r.json()
-# result: {"message": "Receipt parsed", "receipt_id": "...", "items_count": N}
-# NOTE: parsing uses Bedrock Nova — will fail if daily token quota is exhausted
+# result: {"message": "Receipt parsed", "receipt_id": "...", "items_count": N, "parsed_by": "text"|"bedrock-lite"}
+# parsed_by="text" means free regex parse (no Bedrock tokens used)
+# parsed_by="bedrock-lite" means Bedrock was used as fallback (quota may apply)
 print(result)
 ```
 
-If upload succeeds but `items_count` is 0 or an error mentions throttling, the Bedrock daily token quota has been hit. Run the quota script below or wait until midnight UTC for it to reset.
+If `parsed_by` is `bedrock-lite` and items look wrong, try reparsing with Nova Premier:
+```python
+r = requests.post(f"{BASE}/api/reparse/<receipt_id>", headers=HEADERS, timeout=60).json()
+```
 
 ### Delete a receipt
 ```python
@@ -159,8 +179,9 @@ r = requests.delete(f"{BASE}/api/price-drops", headers=HEADERS)
 3. **"I want to upload my receipt"**
    - Ask the user for the local path to the PDF (e.g. `C:\Users\me\Downloads\receipt.pdf`)
    - Authenticate, then `POST /api/upload` with the file
-   - Report `items_count` parsed and offer to run analysis
-   - If throttled: tell the user the Bedrock daily quota is exhausted and to retry after midnight UTC
+   - Report `items_count` and `parsed_by` ("text" = free, "bedrock-lite" = used quota)
+   - If `items_count` is low or items look wrong, offer to reparse with `POST /api/reparse/<receipt_id>`
+   - If Bedrock throttled: tell the user to retry after midnight UTC
 
 4. **"What's my Bedrock token usage / quota?"**
    - Run the Bedrock quota script below

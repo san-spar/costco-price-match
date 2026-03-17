@@ -40,6 +40,13 @@ def get_config():
     return result
 
 
+@app.post("/api/inspect-pdf")
+async def inspect_pdf_endpoint(file: UploadFile = File(...)):
+    """Inspect a PDF without parsing — returns page count, text/image content, and recommended parser."""
+    pdf_bytes = await file.read()
+    return receipt_parser.inspect_pdf(pdf_bytes)
+
+
 @app.post("/api/upload")
 async def upload_receipt(file: UploadFile = File(...)):
     if not file.filename.lower().endswith(".pdf"):
@@ -48,7 +55,7 @@ async def upload_receipt(file: UploadFile = File(...)):
     if len(pdf_bytes) > 10 * 1024 * 1024:
         raise HTTPException(400, "File too large (max 10MB)")
     try:
-        parsed = receipt_parser.parse_receipt_pdf(pdf_bytes)
+        parsed = receipt_parser.parse_receipt_pdf(pdf_bytes)  # auto-routes based on PDF content
     except Exception as e:
         raise HTTPException(500, f"Failed to parse receipt: {e}")
     receipt = db.put_receipt(
@@ -59,7 +66,11 @@ async def upload_receipt(file: UploadFile = File(...)):
     )
     # Store PDF in S3 for potential reparse
     db.upload_pdf(receipt["receipt_id"], pdf_bytes)
-    return {"receipt": receipt, "parsed_items": len(receipt["items"])}
+    return {
+        "receipt": receipt,
+        "items_count": len(receipt["items"]),
+        "parsed_by": parsed.get("parsed_by", "unknown"),
+    }
 
 
 @app.get("/api/receipts")

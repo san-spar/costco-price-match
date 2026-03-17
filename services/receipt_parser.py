@@ -52,6 +52,136 @@ _NOISE_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
+# Matches a typical Costco receipt item line:
+# optional item number (6-8 digits), item name, price (with optional trailing letter or -)
+_ITEM_LINE_RE = re.compile(
+    r"^(?P<item_num>\d{6,8})?\s*(?P<name>[A-Z][A-Z0-9/& ,'.()-]{2,}?)\s{2,}(?P<price>\d{1,4}\.\d{2}-?)(?:[A-Z])?$"
+)
+_TPD_LINE_RE = re.compile(r"^\s*(?:TPD/[\w/ ]+)\s+(?P<price>\d{1,4}\.\d{2})-?", re.IGNORECASE)
+_DATE_RE = re.compile(r"\b(\d{1,2}/\d{1,2}/\d{2,4})\b")
+_STORE_RE = re.compile(r"(COSTCO\s+\w[\w\s]*?)(?:\s{3,}|\n)", re.IGNORECASE)
+_QTY_RE = re.compile(r"^(\d+)\s+@\s+[\d.]+")
+
+
+def inspect_pdf(pdf_bytes: bytes) -> dict:
+    """
+    Inspect PDF content without parsing it.
+    Returns metadata useful for deciding which parser to use.
+    """
+    import fitz
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    info = {
+        "pages": len(doc),
+        "text_chars": 0,
+        "image_count": 0,
+        "has_text": False,
+        "has_images": False,
+        "recommended_parser": "text",  # "text", "bedrock-lite", or "bedrock-premier"
+        "metadata": doc.metadata,
+    }
+
+    for page in doc:
+        text = page.get_text()
+        info["text_chars"] += len(text.strip())
+        info["image_count"] += len(page.get_images(full=False))
+
+    doc.close()
+
+    info["has_text"] = info["text_chars"] > 100
+    info["has_images"] = info["image_count"] > 0
+
+    if info["has_text"]:
+        info["recommended_parser"] = "text"           # selectable PDF — free
+    elif info["has_images"]:
+        info["recommended_parser"] = "bedrock-premier"  # scanned image — use best model
+    else:
+        info["recommended_parser"] = "bedrock-lite"   # unknown — try lite first
+
+    return info
+
+
+
+    """
+    Parse a Costco receipt PDF using pure text extraction (PyMuPDF).
+    Returns None if the text doesn't look like a valid Costco receipt,
+    so the caller can fall back to Bedrock.
+    """
+    import fitz
+
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    text = "\n".join(page.get_text() for page in doc)
+    doc.close()
+
+    lines = [l.rstrip() for l in text.splitlines()]
+
+    # Quick sanity check — Costco receipts always contain these
+    combined = text.upper()
+    if "COSTCO" not in combined and "SUBTOTAL" not in combined:
+        return None
+
+    # Extract date
+    receipt_date = ""
+    for line in lines:
+        m = _DATE_RE.search(line)
+        if m:
+            try:
+                from datetime import datetime
+                for fmt in ("%m/%d/%Y", "%m/%d/%y"):
+                    try:
+                        receipt_date = datetime.strptime(m.group(1), fmt).strftime("%Y-%m-%d")
+                        break
+                    except ValueError:
+                        continue
+            except Exception:
+                pass
+            if receipt_date:
+                break
+
+    # Extract store
+    store = ""
+    m = _STORE_RE.search(text)
+    if m:
+        store = m.group(1).strip()
+
+    # Extract items — stop at subtotal/total
+    items = []
+    pending_qty = None
+    for line in lines:
+        upper = line.upper().strip()
+        if upper.startswith(("SUBTOTAL", "TAX", "TOTAL", "PAYMENT", "CASH", "VISA", "MASTERCARD", "DEBIT", "CREDIT")):
+            break
+
+        # qty lines: "2 @ 7.99"
+        qm = _QTY_RE.match(line.strip())
+        if qm:
+            pending_qty = qm.group(1)
+            continue
+
+        # TPD discount line
+        tpd_m = _TPD_LINE_RE.match(line.strip())
+        if tpd_m:
+            items.append({
+                "name": line.strip().split()[0],  # e.g. "TPD/NUTS"
+                "price": tpd_m.group("price") + "-",
+                "qty": "1",
+                "item_number": "",
+            })
+            pending_qty = None
+            continue
+
+        # Regular item line
+        m = _ITEM_LINE_RE.match(line.strip())
+        if m:
+            items.append({
+                "name": m.group("name").strip(),
+                "price": m.group("price"),
+                "qty": pending_qty or "1",
+                "item_number": m.group("item_num") or "",
+            })
+            pending_qty = None
+
+    return {"store": store, "receipt_date": receipt_date, "items": items}
 
 def _call_model(content, prompt, model_id):
     resp = _bedrock.converse(
@@ -207,11 +337,44 @@ def _post_process(items: list) -> list:
     return merged
 
 
-def parse_receipt_pdf(pdf_bytes: bytes, model: str = "lite") -> dict:
-    """Parse receipt PDF. Lite=fast single-call, Premier=two-call image approach."""
+def parse_receipt_pdf(pdf_bytes: bytes, model: str = "auto") -> dict:
+    """
+    Parse receipt PDF. model can be:
+      "auto"    — inspect PDF first, choose best parser automatically (default)
+      "text"    — force PyMuPDF text extraction (free)
+      "lite"    — force Bedrock Nova 2 Lite
+      "premier" — force Bedrock Nova Premier (highest accuracy, image-based)
+
+    Auto-routing logic (inspect_pdf):
+      text PDF  → text parser (free, no Bedrock)
+      image PDF → bedrock-premier
+      unknown   → bedrock-lite
+    """
+    if model == "auto":
+        info = inspect_pdf(pdf_bytes)
+        if info["has_text"]:
+            # PDF has selectable text — parse directly, no Bedrock needed
+            result = _parse_text(pdf_bytes)
+            result["items"] = _post_process(result.get("items", []))
+            result["parsed_by"] = "text"
+            return result
+        # No text — route to Bedrock based on content type
+        model = info["recommended_parser"].replace("bedrock-", "")  # "lite" or "premier"
+
+    if model == "text":
+        text_result = _parse_text(pdf_bytes)
+        if text_result:
+            text_result["items"] = _post_process(text_result.get("items", []))
+            text_result["parsed_by"] = "text"
+            return text_result
+        # Forced text mode but no text found — fall back to lite
+        model = "lite"
+
     if model == "premier":
         result = _parse_premier(pdf_bytes)
+        result["parsed_by"] = "bedrock-premier"
     else:
+        # Bedrock Nova 2 Lite
         response = _bedrock.converse(
             modelId=MODEL_LITE,
             messages=[{
@@ -229,6 +392,7 @@ def parse_receipt_pdf(pdf_bytes: bytes, model: str = "lite") -> dict:
             if text.startswith("json"):
                 text = text[4:]
         result = json.loads(text.strip())
+        result["parsed_by"] = "bedrock-lite"
 
     result["items"] = _post_process(result.get("items", []))
     return result

@@ -8,8 +8,8 @@ A weekly agent runs every Friday at 9pm ET, generates a formatted HTML report, a
 
 ## How It Works
 
-1. Upload receipt PDFs through the web UI or iOS app
-2. Amazon Nova AI parses every line item, price, item number, and TPD (Temporary Price Drop)
+1. Upload receipt PDFs through the web UI, iOS app, or Telegram (via ClawdBot)
+2. Receipt parser auto-detects PDF type — text-based PDFs parse free with PyMuPDF; scanned/image PDFs route to Amazon Nova AI
 3. Scrapers pull current deals from cocowest, cocoeast, redflagdeals, and the Costco coupon book
 4. AI cross-references your purchases against active deals
 5. Weekly agent emails you a report with price adjustment opportunities and TPD savings already applied
@@ -21,10 +21,27 @@ A weekly agent runs every Friday at 9pm ET, generates a formatted HTML report, a
 - **Web Frontend**: Static HTML on AWS Amplify with Cognito authentication
 - **iOS App**: Native SwiftUI, zero third-party dependencies, 0.9s builds
 - **API**: API Gateway HTTP API → Lambda (FastAPI + Mangum), streaming analysis responses
-- **AI**: Amazon Nova 2 Lite for parsing + analysis, Nova Premier for complex receipts
-- **Automation**: AgentCore Runtime triggered by EventBridge Scheduler universal target (no Lambda middleman), SES for email
-- **Storage**: DynamoDB (receipts + deals), S3 (receipt PDFs with presigned URLs)
+- **Receipt Parsing**: Auto-routing — PyMuPDF text extraction (free) → Nova 2 Lite fallback → Nova Premier for scanned images
+- **AI Analysis**: Amazon Nova for deal cross-referencing and weekly reports
+- **Chat Integration**: OpenClaw/ClawdBot skill for Telegram and Discord
+- **Automation**: AgentCore Runtime triggered by EventBridge Scheduler, SES for email
+- **Storage**: DynamoDB (receipts + deals), S3 (receipt PDFs)
 - **Infrastructure**: CDK (TypeScript), 3 stacks, deploy to any region
+
+## Receipt Parsing
+
+Receipts are parsed with a smart fallback chain — most Costco PDFs are text-based and parse for free:
+
+```
+Upload PDF
+    │
+    ▼ inspect_pdf() — instant, free
+    ├─ Text PDF (text_chars > 100)  →  PyMuPDF regex parser    [FREE]
+    ├─ Image PDF (image_count > 0)  →  Nova Premier (300dpi)   [Bedrock tokens]
+    └─ Unknown                      →  Nova 2 Lite             [Bedrock tokens]
+```
+
+The upload response includes `parsed_by: "text" | "bedrock-lite" | "bedrock-premier"` so you always know whether tokens were consumed. If parsing looks wrong, call `POST /api/reparse/<receipt_id>` to re-run with Nova Premier.
 
 ## Project Structure
 
@@ -164,7 +181,11 @@ npx cdk destroy CostcoScannerCommon -c region=us-west-2
 
 ## Cost
 
-Under $1/month for personal use. Bedrock Nova tokens are the main cost (~$0.10-0.20/week). Lambda, SES, DynamoDB, API Gateway, and Amplify fall within free tier.
+Under $1/month for personal use. Lambda, SES, DynamoDB, API Gateway, and Amplify fall within free tier.
+
+- **Receipt parsing**: Free for text-based PDFs (PyMuPDF). Bedrock Nova tokens only consumed for scanned/image PDFs or manual reparse.
+- **Deal scanning**: Bedrock Nova 2 Lite used for the Costco coupon book scraper (~$0.10-0.20/week). The daily free-tier quota covers typical personal use; a throttle guard stops scanning after 3 consecutive quota errors.
+- **Weekly analysis**: Nova 2 Lite for the Friday email report.
 
 ## ClawdBot / OpenClaw Integration
 

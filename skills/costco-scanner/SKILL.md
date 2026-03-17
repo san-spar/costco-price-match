@@ -85,6 +85,64 @@ with requests.get(f"{BASE}/api/analyze", headers=HEADERS, params=params, stream=
             break
 ```
 
+### Upload a receipt PDF
+```python
+with open("/path/to/receipt.pdf", "rb") as f:
+    r = requests.post(f"{BASE}/api/upload", headers=HEADERS, files={"file": f}, timeout=60)
+result = r.json()
+# result: {"message": "Receipt parsed", "receipt_id": "...", "items_count": N}
+# NOTE: parsing uses Bedrock Nova — will fail if daily token quota is exhausted
+print(result)
+```
+
+If upload succeeds but `items_count` is 0 or an error mentions throttling, the Bedrock daily token quota has been hit. Run the quota script below or wait until midnight UTC for it to reset.
+
+### Delete a receipt
+```python
+r = requests.delete(f"{BASE}/api/receipt/<receipt_id>", headers=HEADERS)
+```
+
+### Delete all receipts
+```python
+r = requests.delete(f"{BASE}/api/receipts", headers=HEADERS)
+```
+
+### Download receipt PDF
+```python
+r = requests.get(f"{BASE}/api/receipt/<receipt_id>/pdf", headers=HEADERS)
+# r.content is the raw PDF bytes
+with open("receipt.pdf", "wb") as f:
+    f.write(r.content)
+```
+
+### Edit a line item on a receipt
+```python
+# index = 0-based position in the items array
+r = requests.put(
+    f"{BASE}/api/receipt/<receipt_id>/item/<index>",
+    headers=HEADERS,
+    json={"item_name": "UPDATED NAME", "price": 12.99, "item_number": "12345"},
+)
+```
+
+### Reparse a receipt with Nova Premier (higher accuracy)
+```python
+# Use when Nova 2 Lite missed items or parsed them incorrectly
+r = requests.post(f"{BASE}/api/reparse/<receipt_id>", headers=HEADERS, timeout=60).json()
+# NOTE: uses Bedrock Nova Premier — will fail if daily token quota is exhausted
+```
+
+### Delete a single deal
+```python
+r = requests.delete(f"{BASE}/api/price-drop/<item_id>", headers=HEADERS)
+```
+
+### Delete all deals
+```python
+r = requests.delete(f"{BASE}/api/price-drops", headers=HEADERS)
+```
+
+
 ## Example workflows
 
 1. **"Do I have any price matches?"**
@@ -98,7 +156,13 @@ with requests.get(f"{BASE}/api/analyze", headers=HEADERS, params=params, stream=
    - `POST /api/scan-prices?force_refresh=true` for a fresh scrape
    - `GET /api/price-drops` and summarize by source/category
 
-3. **"What's my Bedrock token usage / quota?"**
+3. **"I want to upload my receipt"**
+   - Ask the user for the local path to the PDF (e.g. `C:\Users\me\Downloads\receipt.pdf`)
+   - Authenticate, then `POST /api/upload` with the file
+   - Report `items_count` parsed and offer to run analysis
+   - If throttled: tell the user the Bedrock daily quota is exhausted and to retry after midnight UTC
+
+4. **"What's my Bedrock token usage / quota?"**
    - Run the Bedrock quota script below
 
 ## Bedrock token quota and usage

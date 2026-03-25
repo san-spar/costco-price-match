@@ -5,6 +5,7 @@
 cd "$(dirname "$0")/.." && source .venv/bin/activate
 
 export AWS_REGION=${AWS_REGION:-us-east-2}
+export COSTCO_COUNTRY=${COSTCO_COUNTRY:-US}
 
 # Auto-fetch resource names from CDK stack if not set
 if [ -z "$DYNAMODB_RECEIPTS_TABLE" ]; then

@@ -122,20 +122,39 @@ def analyze_receipts(
     sources: str = Query(default=None),
 ):
     src_list = [s.strip() for s in sources.split(",")] if sources else None
-    # Support both single receipt_id and comma-separated receipt_ids
     rid_list = None
     if receipt_ids:
         rid_list = [r.strip() for r in receipt_ids.split(",") if r.strip()]
     elif receipt_id:
         rid_list = [receipt_id]
-    
-    # Check if this is a streaming request (from Amplify with auth)
-    # For now, keep existing StreamingResponse for compatibility
     return StreamingResponse(
         analyzer.run_analysis_stream(rid_list, date_from, date_to, src_list),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/api/price-match-candidates")
+def price_match_candidates(
+    receipt_id: str = Query(default=None),
+    receipt_ids: str = Query(default=None),
+    date_from: str = Query(default=None),
+    date_to: str = Query(default=None),
+    sources: str = Query(default=None),
+):
+    """
+    Pure-Python pre-filter: returns matched candidates + receipt items as JSON.
+    No Bedrock calls. Intended for ClawdBot to do the analysis reasoning with
+    its own configured LLM instead of calling Bedrock from the Lambda.
+    """
+    src_list = [s.strip() for s in sources.split(",")] if sources else None
+    rid_list = None
+    if receipt_ids:
+        rid_list = [r.strip() for r in receipt_ids.split(",") if r.strip()]
+    elif receipt_id:
+        rid_list = [receipt_id]
+
+    return analyzer.get_price_match_data(rid_list, date_from, date_to, src_list)
 
 
 @app.get("/api/receipt/{receipt_id}/pdf")

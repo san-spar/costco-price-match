@@ -1,7 +1,7 @@
 ---
 name: costco-scanner
 description: Scan Costco receipts for price match opportunities and track current deals
-metadata: {"openclaw":{"emoji":"🛒","requires":{"env":["COSTCO_SCANNER_URL"]},"primaryEnv":"COSTCO_SCANNER_URL"}}
+metadata: {"openclaw":{"emoji":"🛒","cron":"0 8 * * 2,4","requires":{"env":["COSTCO_SCANNER_URL"]},"primaryEnv":"COSTCO_SCANNER_URL"}}
 ---
 
 You have access to a personal Costco Receipt Scanner API at `$COSTCO_SCANNER_URL`.
@@ -57,28 +57,97 @@ r = requests.get(f"{BASE}/api/price-drops", headers=HEADERS).json()
 ```
 
 ### Scan for fresh deals
+
 ```python
 r = requests.post(f"{BASE}/api/scan-prices?force_refresh=true", headers=HEADERS, timeout=120).json()
-# Takes 30-60 seconds
+count = r.get("price_drops", 0)
+print(f"✅ {count} deals saved" if count else "⚠️ 0 deals — sources may be down or Bedrock throttled")
+# Takes 30–90 seconds. Sources: costcoinsider.com, hip2save.com, slickdeals.net,
+# reddit.com/r/Costco, costco.com/coupon-book (Bedrock Nova Lite OCR).
+# Omit force_refresh=true to reuse today's cached deals and skip re-scraping.
 ```
 
-### Analyze receipts for price match opportunities
-```python
-import json
+### Automated deal scan (cron / no user message)
 
-params = {}  # optionally: receipt_id, receipt_ids, date_from, date_to, sources
+When triggered by cron with no user message, run this full sequence silently:
+
+```python
+import requests, boto3, os
+
+BASE = os.environ["COSTCO_SCANNER_URL"]
+
+# Auth
+cfg = requests.get(f"{BASE}/api/config", timeout=10).json()
+TOKEN = boto3.client("cognito-idp", region_name=cfg["region"]).initiate_auth(
+    AuthFlow="USER_PASSWORD_AUTH",
+    AuthParameters={"USERNAME": cfg["username"], "PASSWORD": cfg["password"]},
+    ClientId=cfg["user_pool_client_id"],
+)["AuthenticationResult"]["IdToken"]
+HEADERS = {"Authorization": f"Bearer {TOKEN}"}
+
+# Scan
+r = requests.post(f"{BASE}/api/scan-prices?force_refresh=true", headers=HEADERS, timeout=120)
+count = r.json().get("price_drops", 0) if r.status_code == 200 else None
+
+# Report — only surface something noteworthy
+if count is None:
+    print(f"❌ Deal scan failed: HTTP {r.status_code}")
+elif count == 0:
+    print("⚠️ Deal scan returned 0 deals — sources may be down or Bedrock quota exhausted")
+else:
+    print(f"✅ Costco deal scan complete — {count} deals cached (ready for price matching)")
+```
+
+
+### Analyze for price matches (bot does the reasoning — no Bedrock needed)
+
+This is the **preferred workflow** — the API returns pre-matched data and you
+format the result using your own LLM. Zero Bedrock quota used.
+
+```python
+r = requests.get(f"{BASE}/api/price-match-candidates", headers=HEADERS).json()
+# r = {
+#   "candidates": [ {receipt_item, receipt_price, deal_name, deal_price, savings,
+#                    matched_by, receipt_date, store, tpd_at_purchase,
+#                    deal_source, deal_link, deal_expiry, ...} ],
+#   "tpd_items":  [ {name, price, original_price, receipt_date, store, ...} ],
+#   "receipt_count": N,
+#   "deal_count": N
+# }
+candidates = r["candidates"]
+tpd_items  = r["tpd_items"]
+```
+
+Once you have the data, format it as two markdown tables:
+
+**Table 1 — 💰 Price Adjustment Opportunities**
+Rows where `tpd_at_purchase=false` and `savings > 0`, sorted by date (newest first).
+Columns: Item | Item # | Date | Paid | Sale Price | Savings | Source
+
+**Table 2 — ✅ Already Applied (TPD)**
+All `tpd_items`, showing what was saved at checkout.
+Columns: Item | Item # | Date | Original | Paid (TPD) | TPD Savings
+
+Rules:
+- `matched_by=exact_item_number` → always valid
+- `matched_by=partial_item_number` → very likely valid
+- `matched_by=name_keyword` → verify the products are actually the same before including
+- Only include a row if `deal_price < receipt_price` (the API pre-filters but double-check)
+- Items with `tpd_at_purchase=true` → Table 2 only, even if they have further savings
+
+### Analyze via Bedrock (fallback — uses Bedrock quota)
+```python
+# Use only if /api/price-match-candidates is unavailable or returns no data
+import json
+params = {}  # optional: receipt_id, receipt_ids, date_from, date_to, sources
 with requests.get(f"{BASE}/api/analyze", headers=HEADERS, params=params, stream=True, timeout=120) as r:
     for line in r.iter_lines():
-        if not line:
-            continue
+        if not line: continue
         line = line.decode()
-        if not line.startswith("data: "):
-            continue
+        if not line.startswith("data: "): continue
         event = json.loads(line[6:])
-        if event["type"] == "tool":
-            print(f"Running: {event['name']}")
-        elif event["type"] == "done":
-            print(event["text"])  # full markdown report
+        if event["type"] == "done":
+            print(event["text"])
             break
         elif event["type"] == "error":
             print(f"Error: {event['text']}")
@@ -184,7 +253,9 @@ r = requests.delete(f"{BASE}/api/price-drops", headers=HEADERS)
 1. **"Do I have any price matches?"**
    - Authenticate (Python script above)
    - `GET /api/receipts` to confirm receipts exist
-   - `GET /api/analyze` (streaming) and show the final `done` event text
+   - `POST /api/scan-prices` (no force_refresh) — uses cached deals if scanned today, otherwise runs fresh scan
+   - `GET /api/price-match-candidates` to get matched data, then reason over results with your LLM
+   - If no candidates found, try `POST /api/scan-prices?force_refresh=true` to force a fresh deal scrape
    - Summarize total potential savings
 
 2. **"What Costco deals are on right now?"**
@@ -282,7 +353,9 @@ for page in sq.get_paginator("list_service_quotas").paginate(ServiceCode="bedroc
 ## Notes
 
 - Credentials are fetched at runtime from `/api/config` (served from AWS Secrets Manager) — no hardcoded passwords needed.
-- Deal sources: `cocowest.ca`, `cocoeast.ca`, `costco.ca/coupon-book`, `redflagdeals.com`, `reddit.com/r/Costco`, `reddit.com/r/CostcoCanada`.
+- Deal sources are country-aware via `COSTCO_COUNTRY` env var (default `CA`):
+  - `CA`: `redflagdeals.com`, `reddit.com/r/CostcoCanada`, `cocowest.ca`, `cocoeast.ca`, `costco.ca/coupon-book` (SmartCanucks)
+  - `US`: `costcoinsider.com`, `hip2save.com`, `slickdeals.net`, `reddit.com/r/Costco`, `costco.com/coupon-book`
 - Items with `tpd=true` on a receipt already had a Temporary Price Drop at checkout — shown in a separate "Already Applied" table.
 - Price adjustments must be requested at the Costco membership counter within 30 days of purchase.
 - A weekly agent automatically emails a price match report every Friday at 9pm ET when the AgentCore stack is deployed.

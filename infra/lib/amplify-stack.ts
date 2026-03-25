@@ -215,6 +215,7 @@ export class AmplifyStack extends cdk.Stack {
         USER_POOL_ID: this.userPool.userPoolId,
         USER_POOL_CLIENT_ID: this.webAppClient.userPoolClientId,
         APP_SECRET_ARN: appSecret.secretArn,
+        COSTCO_COUNTRY: this.node.tryGetContext('costcoCountry') ?? 'US',
       },
     });
 

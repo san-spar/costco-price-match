@@ -6,14 +6,15 @@ $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";
 
 $REGION = if ($env:AWS_DEFAULT_REGION) { $env:AWS_DEFAULT_REGION } else { "us-east-2" }
 $NOTIFY_EMAIL = if ($env:NOTIFY_EMAIL) { $env:NOTIFY_EMAIL } else { "" }
+$COSTCO_COUNTRY = if ($env:COSTCO_COUNTRY) { $env:COSTCO_COUNTRY } else { "US" }
 
-Write-Host "Deploying Costco Scanner to $REGION..."
+Write-Host "Deploying Costco Scanner to $REGION (country: $COSTCO_COUNTRY)..."
 
 # Step 1: CDK deploy
 Write-Host "Running CDK deploy..."
 Push-Location "$PSScriptRoot\..\infra"
 
-$CDK_CONTEXT = "-c region=$REGION"
+$CDK_CONTEXT = "-c region=$REGION -c costcoCountry=$COSTCO_COUNTRY"
 if ($NOTIFY_EMAIL) { $CDK_CONTEXT += " -c notifyEmail=$NOTIFY_EMAIL" }
 
 $cdkArgs = @("cdk", "deploy", "--all", "--require-approval", "never") + ($CDK_CONTEXT -split " ")

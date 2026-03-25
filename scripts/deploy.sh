@@ -5,14 +5,15 @@ set -e
 
 REGION=${AWS_DEFAULT_REGION:-us-east-2}
 NOTIFY_EMAIL=${NOTIFY_EMAIL:-}
+COSTCO_COUNTRY=${COSTCO_COUNTRY:-US}
 
-echo "🚀 Deploying Costco Scanner to $REGION...\"
+echo "🚀 Deploying Costco Scanner to $REGION (country: $COSTCO_COUNTRY)..."
 
 # Step 1: CDK deploy
 echo "📦 Running CDK deploy..."
 cd "$(dirname "$0")/../infra"
 
-CDK_CONTEXT="-c region=$REGION"
+CDK_CONTEXT="-c region=$REGION -c costcoCountry=$COSTCO_COUNTRY"
 [ -n "$NOTIFY_EMAIL" ] && CDK_CONTEXT="$CDK_CONTEXT -c notifyEmail=$NOTIFY_EMAIL"
 
 npx cdk deploy --all --require-approval never $CDK_CONTEXT

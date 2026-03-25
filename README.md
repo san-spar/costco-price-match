@@ -59,6 +59,74 @@ The upload response includes `parsed_by: "text" | "bedrock-lite" | "bedrock-prem
 └── requirements.txt
 ```
 
+## API Flow
+
+Three independent pipelines — each can be triggered separately:
+
+```
+PIPELINE 1: Receipt Ingestion  (triggered on upload)
+─────────────────────────────────────────────────────
+POST /api/upload
+    │
+    ├─ receipt_parser.parse_receipt_pdf()
+    │      ├─ inspect_pdf() — is it text-based or image-based?
+    │      ├─ TEXT PDF → _parse_text() state machine  (free, no Bedrock)
+    │      └─ IMAGE PDF → Bedrock Nova Premier OCR
+    │
+    ├─ db.put_receipt()  → DynamoDB receipts table
+    └─ db.upload_pdf()   → S3  (stored for reparse)
+
+
+PIPELINE 2: Deal Scanning  (manual trigger or weekly AgentCore)
+────────────────────────────────────────────────────────────────
+POST /api/scan-prices?force_refresh=true
+    │
+    └─ price_scanner.scan_price_drops()
+           ├─ _scrape_costcoinsider()  ─┐
+           ├─ _scrape_hip2save()        │  text scraping — no Bedrock
+           ├─ _scrape_slickdeals()      │  (set COSTCO_COUNTRY=CA for
+           ├─ _scrape_reddit("Costco") ─┘   Canadian sources instead)
+           └─ _scrape_coupon_book_us()  ──  Bedrock Nova Lite (image OCR)
+           │
+           └─ db.put_price_drop()  → DynamoDB price_drops table
+              (deduplicates by name + promo_end, skips expired deals)
+
+
+PIPELINE 3: Price Match Analysis  (reads from both tables — no scraping)
+─────────────────────────────────────────────────────────────────────────
+
+  PATH A — Bot-side, preferred  (zero Bedrock)
+  ─────────────────────────────
+  GET /api/price-match-candidates
+      │
+      ├─ db.get_recent_receipts(30)   ← DynamoDB receipts table
+      ├─ db.get_all_price_drops()     ← DynamoDB price_drops table
+      │
+      └─ Pure Python matching:
+             1. Exact item number match        (highest confidence)
+             2. Partial item number (first 5 digits)
+             3. Name keyword overlap (2+ words)
+             4. Filter: deal_price < receipt_price  (real savings only)
+             └─ Returns JSON  →  ClawdBot's own LLM formats the response
+
+  PATH B — Bedrock streaming fallback
+  ────────────────────────────────────
+  GET /api/analyze
+      │
+      ├─ db.get_all_price_drops()   ← DynamoDB price_drops table
+      ├─ db.get_recent_receipts()   ← DynamoDB receipts table
+      │
+      └─ AWS Strands agent with 3 tools:
+             tool 1: get_receipt_items_local()
+             tool 2: get_current_price_drops_local()
+             tool 3: find_potential_matches_local()  ← same logic as Path A
+             └─ Claude reasons over matches  →  SSE stream to caller
+```
+
+> **Note:** Deal scanning must run before analysis. If the price_drops table is
+> empty, both analysis paths return no candidates. Deals are cached per day —
+> omit `force_refresh` to reuse today's scan and avoid re-scraping.
+
 ## iOS App — CostScanner
 
 Native SwiftUI app with a BYOI (Bring Your Own Infrastructure) model. Deploy the CDK stack, paste your API URL in Settings, and the app auto-connects. No sign-in screen. No account creation. The infrastructure IS the account.

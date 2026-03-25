@@ -6,6 +6,7 @@ $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";
 Set-Location "$PSScriptRoot\.."
 
 if (-not $env:AWS_REGION) { $env:AWS_REGION = "us-east-2" }
+if (-not $env:COSTCO_COUNTRY) { $env:COSTCO_COUNTRY = "US" }
 
 # Auto-fetch resource names from CDK stack if not set
 if (-not $env:DYNAMODB_RECEIPTS_TABLE) {

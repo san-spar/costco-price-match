@@ -390,6 +390,10 @@ def _parse_text(pdf_bytes: bytes) -> dict:
     doc.close()
 
     lines = [l.strip() for l in full_text.split("\n")]
+    # Normalize dot-leader format used by computer-generated receipts:
+    # "KS Organic 2% Milk .................. 14.99" → "KS Organic 2% Milk 14.99"
+    lines = [re.sub(r'\s*\.{3,}\s*', ' ', l) for l in lines]
+
 
     # Store: first non-empty line (e.g. "LYNNWOOD #1190")
     store = next((l for l in lines if l), "")
@@ -405,15 +409,28 @@ def _parse_text(pdf_bytes: bytes) -> dict:
     _PRICE_RE = re.compile(r"^(\d+\.\d{2}-?)\s*[A-Z]?$")
     _NUM_RE = re.compile(r"^\d{1,8}$")          # item number alone on its line
     _INLINE_FULL_RE = re.compile(               # "1068080 PASTURE EGGS 8.49 N"
-        r"^(\d{1,8})\s+(.+?)\s+(\d+\.\d{2}-?)\s*[A-Z]?$"
+        r"^(\d{1,8})\s+(.+?)\s+(-?\d+\.\d{2}-?)\s*[A-Z]?$"
     )
     _INLINE_PARTIAL_RE = re.compile(r"^(\d{1,8})\s+(.+)$")   # "1729565 LAUGHING"
     _NAME_PRICE_RE = re.compile(r"^(.+?)\s+(\d+\.\d{2}-?)\s*[A-Z]?$")
     _STOP = {"SUBTOTAL", "TAX", "TOTAL", "CHANGE", "VISA", "MASTERCARD", "AMEX", "DISCOVER"}
 
     items = []
-    i = 0
     n = len(lines)
+
+    # Skip header lines until we reach the "Items" section marker or the first item line.
+    # This prevents address lines like "8629 120th Avenue NE" from being misread as item numbers.
+    i = 0
+    _ITEM_START_RE = re.compile(r"^\d{1,8}\s+\S")
+    while i < n:
+        l = lines[i]
+        if l.upper() == "ITEMS":
+            i += 1  # skip the "Items" header itself, then start parsing
+            break
+        i += 1
+    # If no "Items" header found, fall back to scanning from the start
+    if i >= n:
+        i = 0
 
     while i < n:
         line = lines[i]
@@ -430,10 +447,13 @@ def _parse_text(pdf_bytes: bytes) -> dict:
         # ── Full inline: "1068080 PASTURE EGGS 8.49 N" ──────────────────────
         m = _INLINE_FULL_RE.match(line)
         if m:
+            price = m.group(3)
+            if price.startswith("-"):  # "-3.00" → "3.00-" for uniform discount handling
+                price = price[1:] + "-"
             items.append({
                 "item_number": m.group(1),
                 "name": m.group(2).strip(),
-                "price": m.group(3),
+                "price": price,
                 "qty": "1",
             })
             i += 1
